@@ -40,7 +40,7 @@ class Degradation(object):
 
     def single_degrade(self,clean_patch,degrade_type = None):
         if degrade_type == None:
-            degrade_type = random.randint(0, 3)
+            degrade_type = random.randint(0, 2)
         else:
             degrade_type = degrade_type
 
