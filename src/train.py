@@ -22,6 +22,21 @@ from data.dataset_utils import AIOTrainDataset, CDD11  # 导入训练数据集
 from utils.loss_utils import FFTLoss  # 导入频域辅助损失
 
 
+def resolve_output_root(opt):
+    """Resolve root folder for user-visible outputs.
+
+    Keep backward compatibility:
+    - default --output_path ("output/") -> use current working directory.
+    - custom --output_path -> use that path as root.
+    """
+    output_path = getattr(opt, "output_path", None)
+    if output_path is None:
+        return os.getcwd()
+    normalized = os.path.normpath(os.path.expanduser(output_path))
+    if normalized in {"output", "."}:
+        return os.getcwd()
+    return normalized
+
 
 class PLTrainModel(pl.LightningModule):  # 定义 Lightning 训练模块
     def __init__(self, opt):  # 构造函数，接收训练参数
@@ -93,8 +108,9 @@ def main(opt):  # 训练主函数
     print("Options")  # 打印参数标题
     print(opt)  # 打印完整参数
     time_stamp = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')  # 生成当前时间戳字符串
-        
-    log_dir = os.path.join("logs/", time_stamp)  # 构造日志目录路径
+
+    output_root = resolve_output_root(opt)  # 解析输出根目录（兼容旧默认行为）
+    log_dir = os.path.join(output_root, "logs", time_stamp)  # 构造日志目录路径
     pathlib.Path(log_dir).mkdir(parents=True, exist_ok=True)  # 创建日志目录（不存在则创建）
     if opt.wblogger:  # 若启用 WandB 日志
         name = opt.model + "_" + time_stamp  # 组合实验名称

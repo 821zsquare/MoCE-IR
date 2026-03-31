@@ -21,6 +21,22 @@ from utils.test_utils import save_img
 from data.dataset_utils import IRBenchmarks, CDD11
 
 
+def resolve_output_root(opt):
+    """Resolve root folder for saved outputs.
+
+    Keep backward compatibility:
+    - default --output_path ("output/") -> save under current working directory.
+    - custom --output_path -> use that path as root.
+    """
+    output_path = getattr(opt, "output_path", None)
+    if output_path is None:
+        return os.getcwd()
+    normalized = os.path.normpath(os.path.expanduser(output_path))
+    if normalized in {"output", "."}:
+        return os.getcwd()
+    return normalized
+
+
 
 ####################################################################################################
 ## HELPERS
@@ -79,9 +95,11 @@ class PLTestModel(pl.LightningModule):
 ####################################################################################################
 def run_test(opts, net, dataset, factor=8):
     testloader = DataLoader(dataset, batch_size=1, pin_memory=True, shuffle=False, drop_last=False, num_workers=0)
-    
+
+    output_root = resolve_output_root(opts)
+    result_dir = os.path.join(output_root, "results", opts.checkpoint_id, opts.benchmarks[0])
     if opts.save_results:
-        pathlib.Path(os.path.join(os.getcwd(), f"results/{opts.checkpoint_id}/{opts.benchmarks[0]}")).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(result_dir).mkdir(parents=True, exist_ok=True)
     calc_lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True, reduction="mean").cuda()
     psnr, ssim, lpips = [], [], []
     with torch.no_grad():
@@ -111,9 +129,7 @@ def run_test(opts, net, dataset, factor=8):
             if opts.save_results:
                 save_name = os.path.splitext(os.path.split(clean_name[0])[-1])[0] + '_' + str(round(psnr_temp, 2)) +'.png'
                 save_img(
-                (os.path.join(os.getcwd(), 
-                            f"results/{opts.checkpoint_id}/{opts.benchmarks[0]}", 
-                            save_name)), 
+                (os.path.join(result_dir, save_name)),
                 img_as_ubyte(restored))
 
     print('PSNR: {:f} SSIM: {:f} LPIPS: {:f}\n'.format(np.mean(psnr), np.mean(ssim), np.mean(lpips)))
