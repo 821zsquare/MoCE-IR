@@ -1,6 +1,8 @@
 logs
 wandb
-results
+datasets/
+outputs/
+results/
 train_ckpt
 visuals
 tests

@@ -21,6 +21,7 @@ class CDD11(Dataset):
         self.de_type = self.args.de_type
         self.dataset_split = split
         self.subset = subset
+        self.test_samples = None
         if split == "train":
             self.patch_size = args.patch_size
         else:
@@ -34,8 +35,11 @@ class CDD11(Dataset):
             degradation_type = random.choice(list(self.degraded_dict.keys()))
             degraded_image_path = random.choice(self.degraded_dict[degradation_type])
         else:
-            degradation_type = self.subset
-            degraded_image_path = self.degraded_dict[degradation_type][index]
+            if self.test_samples is not None:
+                degradation_type, degraded_image_path = self.test_samples[index]
+            else:
+                degradation_type = self.subset
+                degraded_image_path = self.degraded_dict[degradation_type][index]
         
         # Select a degraded image within that type
 
@@ -62,6 +66,8 @@ class CDD11(Dataset):
         return [clean_image_path, degradation_type], lr, hr
 
     def __len__(self):
+        if self.dataset_split != "train" and self.test_samples is not None:
+            return len(self.test_samples)
         return sum(len(images) for images in self.degraded_dict.values())
 
     def _init(self):
@@ -85,6 +91,13 @@ class CDD11(Dataset):
                 degraded_images *= 2
             
             self.degraded_dict[folder_name] = degraded_images
+
+        if self.dataset_split != "train" and self.subset in {"single", "double", "triple", "all"}:
+            self.test_samples = [
+                (degradation_type, image_path)
+                for degradation_type, image_paths in self.degraded_dict.items()
+                for image_path in image_paths
+            ]
 
     def _filter_degradation_folders(self, data_dir):
         """
@@ -379,20 +392,32 @@ class IRBenchmarks(Dataset):
         return len(self.lr)
     
     def _init_lr(self):
-        if 'lolv1' in self.benchmarks:
-            self._init_synllie(id=self.de_dict['synllie'])
-        if 'gopro' in self.benchmarks:
-            self._init_deblurring("GoPro", id=self.de_dict['deblur'])
+        if 'lolv1' in self.benchmarks or 'synllie' in self.benchmarks:
+            self._init_synllie(id=self._de_id('synllie', 'lolv1'))
+        if 'gopro' in self.benchmarks or 'deblur' in self.benchmarks:
+            self._init_deblurring("GoPro", id=self._de_id('deblur', 'gopro'))
         if 'derain' in self.benchmarks:
-            self._init_derain(id=self.de_dict['derain'])
+            self._init_derain(id=self._de_id('derain'))
         if 'dehaze' in self.benchmarks:
-            self._init_dehaze(id=self.de_dict['dehaze'])
+            self._init_dehaze(id=self._de_id('dehaze'))
         if 'denoise_15' in self.benchmarks:
-            self._init_denoise(id=0)
+            self._init_denoise(id=self._de_id('denoise_15'))
         if 'denoise_25' in self.benchmarks:
-            self._init_denoise(id=0)
+            self._init_denoise(id=self._de_id('denoise_25'))
         if 'denoise_50' in self.benchmarks:
-            self._init_denoise(id=0)
+            self._init_denoise(id=self._de_id('denoise_50'))
+        if 'denoise_75' in self.benchmarks:
+            self._init_denoise(id=self._de_id('denoise_75'))
+        if 'denoise_100' in self.benchmarks:
+            self._init_denoise(id=self._de_id('denoise_100'))
+        if 'driving' in self.benchmarks:
+            self._init_driving()
+
+    def _de_id(self, *names):
+        for name in names:
+            if name in self.de_dict:
+                return self.de_dict[name]
+        return names[0]
 
     def _get_nonhazy_name(self, hazy_name):
         dir_name = os.path.dirname(os.path.dirname(hazy_name)) + "/gt"
@@ -462,3 +487,36 @@ class IRBenchmarks(Dataset):
         self.lr = [{"img" : x, "de_type":id} for x in clean]
         self.hr = [{"img" : x, "de_type":id} for x in clean]
         print("Total Denoise testing pairs : {}".format(len(self.lr)))
+
+    ####################################################################################################
+    ## AUTONOMOUS DRIVING DATASET
+    def _init_driving(self):
+        inputs = self.args.data_file_dir + "/driving/test/input"
+        targets = self.args.data_file_dir + "/driving/test/target"
+        prefix_to_de_type = {
+            "Deblur": "deblur",
+            "Dehaze": "dehaze",
+            "Denoise": "denoise_25",
+            "Derain": "derain",
+            "lowlight": "synllie",
+        }
+
+        self.lr = []
+        self.hr = []
+        for input_path in sorted(glob.glob(inputs + "/*.jpg")):
+            image_name = os.path.basename(input_path)
+            prefix = image_name.split("-", maxsplit=1)[0]
+            if prefix not in prefix_to_de_type:
+                raise ValueError(f"Unknown driving degradation prefix '{prefix}' in {image_name}")
+
+            target_path = os.path.join(targets, image_name)
+            if not os.path.exists(target_path):
+                raise FileNotFoundError(f"Driving target image not found: {target_path}")
+
+            de_id = self._de_id(prefix_to_de_type[prefix])
+            self.lr.append({"img": input_path, "de_type": de_id})
+            self.hr.append({"img": target_path, "de_type": de_id})
+
+        if len(self.lr) == 0:
+            raise ValueError(f"No driving testing images found in {inputs}")
+        print("Total Driving testing pairs : {}".format(len(self.lr)))

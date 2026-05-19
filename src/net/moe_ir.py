@@ -388,8 +388,7 @@ class ModExpert(nn.Module):
 class AdapterLayer(nn.Module):
     def __init__(self, 
                  dim: int, rank: int, num_experts: int = 4, top_k: int=2, expert_layer: nn.Module=FFTAttention, stage_depth: int=1,
-                 depth_type: str="lin", rank_type: str="constant", freq_dim: int=128, 
-                 with_complexity: bool=False, complexity_scale: str="min"):
+                 freq_dim: int=128):
         super().__init__()            
         
         self.tau = 1
@@ -398,38 +397,10 @@ class AdapterLayer(nn.Module):
         self.noise_eps = 1e-2
         self.num_experts = num_experts
 
-        patch_sizes = [2**(i+2) for i in range(num_experts)]
-        kernel_sizes = [3+(2*i) for i in range(num_experts)]
-        
-        if depth_type == "lin":
-            depths = [stage_depth+i for i in range(num_experts)]
-        elif depth_type == "double":
-            depths = [stage_depth+(2*i) for i in range(num_experts)]
-        elif depth_type == "exp":
-            depths = [2**(i) for i in range(num_experts)]
-        elif depth_type == "fact":
-            depths = [math.factorial(i+1) for i in range(num_experts)]
-        elif isinstance(depth_type, int):
-            depths = [depth_type for _ in range(num_experts)]
-        elif depth_type == "constant":
-            depths = [stage_depth for i in range(num_experts)]
-        else:
-            raise(NotImplementedError)
-        
-        if rank_type == "constant":
-            ranks = [rank for _ in range(num_experts)]
-        elif rank_type == "lin":
-            ranks = [rank+i for i in range(num_experts)]
-        elif rank_type == "double":
-            ranks = [rank+(2*i) for i in range(num_experts)]
-        elif rank_type == "exp":
-            ranks = [rank**(i+1) for i in range(num_experts)]
-        elif rank_type == "fact":
-            ranks = [math.factorial(rank+i) for i in range(num_experts)]
-        elif rank_type == "spread":
-            ranks = [dim//(2**i) for i in range(num_experts)][::-1]
-        else:
-            raise(NotImplementedError)
+        patch_sizes = [8 for _ in range(num_experts)]
+        kernel_sizes = [3 for _ in range(num_experts)]
+        depths = [stage_depth for _ in range(num_experts)]
+        ranks = [dim for _ in range(num_experts)]
         
         self.experts = nn.ModuleList([
             MySequential(*[ModExpert(dim, rank=rank, func=expert_layer, depth=depth, patch_size=patch, kernel_size=kernel)])
@@ -437,11 +408,9 @@ class AdapterLayer(nn.Module):
         ])
                 
         self.proj_out = nn.Conv2d(dim, dim, kernel_size=1, padding=0, bias=False)
-        expert_complexity = torch.tensor([sum(p.numel() for p in expert.parameters()) for expert in self.experts])
         self.routing = RoutingFunction(
             dim, freq_dim, 
-            num_experts=num_experts, k=top_k,
-            complexity=expert_complexity, use_complexity_bias=with_complexity, complexity_scale=complexity_scale
+            num_experts=num_experts, k=top_k
         )
         
     def forward(self, x, freq_emb, shared):
@@ -460,7 +429,7 @@ class AdapterLayer(nn.Module):
     
 
 class RoutingFunction(nn.Module):
-    def __init__(self, dim, freq_dim, num_experts, k, complexity, use_complexity_bias: bool = True, complexity_scale: str="max"):
+    def __init__(self, dim, freq_dim, num_experts, k):
         super(RoutingFunction, self).__init__()
         
         self.gate = nn.Sequential(
@@ -468,21 +437,14 @@ class RoutingFunction(nn.Module):
             Rearrange('b c 1 1 -> b c'),
             nn.Linear(dim, num_experts, bias=False)
         ) 
-        self.freq_gate = nn.Linear(freq_dim, num_experts, bias=False)
-        if complexity_scale == "min":
-            complexity = complexity / complexity.min()
-        elif complexity_scale == "max":
-            complexity = complexity / complexity.max()
-        self.register_buffer('complexity', complexity)
         
         self.k = k
         self.tau = 1
         self.num_experts = num_experts
         self.noise_std = (1.0 / num_experts) * 1.0
-        self.use_complexity_bias = use_complexity_bias
 
     def forward(self, x, freq_emb):
-        logits = self.gate(x) + self.freq_gate(freq_emb)
+        logits = self.gate(x)
         if self.training:
             loss_imp = self.importance_loss(logits.softmax(dim=-1))
 
@@ -506,7 +468,6 @@ class RoutingFunction(nn.Module):
 
     def importance_loss(self, gating_scores):
         importance = gating_scores.sum(dim=0)
-        importance = importance * (self.complexity * self.tau) if self.use_complexity_bias else importance
         imp_mean = importance.mean()
         imp_std = importance.std()
         loss_imp = (imp_std / (imp_mean + 1e-8)) ** 2
@@ -567,8 +528,8 @@ class EncoderBlock(nn.Module):
 ##########################################################################
 ## Decoder Block
 class DecoderBlock(nn.Module):
-    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type, expert_layer, complexity_scale=None,
-                 rank=None, num_experts=None, top_k=None, depth_type=None, rank_type=None, stage_depth=None, freq_dim:int=128, with_complexity: bool=False):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type, expert_layer,
+                 rank=None, num_experts=None, top_k=None, stage_depth=None, freq_dim:int=128):
         super().__init__()
 
         self.norms = nn.ModuleList([
@@ -588,8 +549,7 @@ class DecoderBlock(nn.Module):
         self.adapter = AdapterLayer(
             dim, rank, 
             top_k=top_k, num_experts=num_experts, expert_layer=expert_layer, freq_dim=freq_dim,
-            depth_type=depth_type, rank_type=rank_type, stage_depth=stage_depth, 
-            with_complexity=with_complexity, complexity_scale=complexity_scale
+            stage_depth=stage_depth
         )
         
     def forward(self, x, freq_emb=None):    
@@ -637,8 +597,8 @@ class EncoderResidualGroup(nn.Module):
 ## Decoder Residual Group
 class DecoderResidualGroup(nn.Module):
     def __init__(self, 
-                 dim: int, num_heads: List[int], num_blocks: int, ffn_expansion: int, LayerNorm_type: str, bias: bool, complexity_scale=None,
-                 rank=None, num_experts=None, expert_layer=None, top_k=None, depth_type=None, stage_depth=None, rank_type=None, freq_dim:int=128, with_complexity: bool=False):
+                 dim: int, num_heads: List[int], num_blocks: int, ffn_expansion: int, LayerNorm_type: str, bias: bool,
+                 rank=None, num_experts=None, expert_layer=None, top_k=None, stage_depth=None, freq_dim:int=128):
         super().__init__()
 
         self.loss = None   
@@ -650,8 +610,7 @@ class DecoderResidualGroup(nn.Module):
                 DecoderBlock(
                     dim, num_heads, ffn_expansion, bias, LayerNorm_type, 
                     expert_layer=expert_layer, rank=rank, num_experts=num_experts, top_k=top_k, 
-                    stage_depth=stage_depth, freq_dim=freq_dim, complexity_scale=complexity_scale,
-                    depth_type=depth_type, rank_type=rank_type, with_complexity=with_complexity
+                    stage_depth=stage_depth, freq_dim=freq_dim
                 )
             )
 
@@ -732,7 +691,7 @@ class FrequencyEmbedding(nn.Module):
     
 ##########################################################################
 ##
-class MoCEIR(nn.Module):
+class MoEIR(nn.Module):
     def __init__(self,
                 inp_channels=3, 
                 out_channels=3, 
@@ -747,15 +706,11 @@ class MoCEIR(nn.Module):
                 bias = False,
                 rank=2,
                 num_experts=4,
-                depth_type="lin",
                 stage_depth=[3,2,1],
-                rank_type="constant",
                 topk=1,
                 expert_layer=FFTAttention,
-                with_complexity=False,
-                complexity_scale="max",
                 ):
-        super(MoCEIR, self).__init__()
+        super(MoEIR, self).__init__()
         
         self.levels = levels
         self.num_blocks = num_blocks
@@ -767,7 +722,6 @@ class MoCEIR(nn.Module):
 
         # -- Patch Embedding
         self.patch_embed = OverlapPatchEmbed(in_c=inp_channels, embed_dim=dim, bias=False)
-        self.freq_embed = FrequencyEmbedding(dims[-1])
                 
         # -- Encoder --        
         self.enc = nn.ModuleList([])
@@ -807,8 +761,8 @@ class MoCEIR(nn.Module):
                     num_blocks=num_dec_blocks[i], 
                     num_heads=heads[i+1],
                     ffn_expansion=ffn_expansion_factor, 
-                    LayerNorm_type=LayerNorm_type, bias=bias, expert_layer=expert_layer, freq_dim=dims[0], with_complexity=with_complexity,
-                    rank=ranks[i], num_experts=num_experts, stage_depth=stage_depth[i], depth_type=depth_type, rank_type=rank_type, top_k=topk, complexity_scale=complexity_scale),
+                    LayerNorm_type=LayerNorm_type, bias=bias, expert_layer=expert_layer, freq_dim=dims[0],
+                    rank=ranks[i], num_experts=num_experts, stage_depth=stage_depth[i], top_k=topk),
                 ])
             )
 
@@ -836,12 +790,11 @@ class MoCEIR(nn.Module):
             feats = downsample(feats)
         
         feats = self.latent(feats)
-        freq_emb = self.freq_embed(feats)
                 
         for i, (upsample, fusion, block) in enumerate(self.dec):
             feats = upsample(feats)
             feats = fusion(torch.cat([feats, enc_feats.pop()], dim=1))
-            feats = block(feats, freq_emb)
+            feats = block(feats)
             self.total_loss += block.loss
 
         feats = self.refinement(feats)
@@ -855,8 +808,8 @@ class MoCEIR(nn.Module):
     
 if __name__ == "__main__":
     # test
-    model = MoCEIR(rank=2, num_blocks=[4,6,6,8], num_dec_blocks=[2,4,4], levels=4, dim=48, num_refinement_blocks=4, 
-                   with_complexity=True, complexity_scale="max", stage_depth=[1,1,1], depth_type="constant", rank_type="spread", 
+    model = MoEIR(rank=2, num_blocks=[4,6,6,8], num_dec_blocks=[2,4,4], levels=4, dim=48, num_refinement_blocks=4, 
+                   stage_depth=[1,1,1],
                    num_experts=4, topk=1, expert_layer=FFTAttention).cuda()
 
     x = torch.randn(1, 3, 224, 224).cuda()

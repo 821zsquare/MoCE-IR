@@ -24,7 +24,7 @@ def base_parser():
     parser = argparse.ArgumentParser()
 
     # Basic training settings
-    parser.add_argument('--model', type=str, required=True, help='Model to use: MoCE_IR or MoCE_IR_S.')
+    parser.add_argument('--model', type=str, required=True, help='Model to use: MoCE_IR, MoCE_IR_S, MoE_IR, MoE_IR_S, MSDR_MoE_IR, MSDR_MoE_IR_S, MSDR_Stage_MoE_IR, or MSDR_Stage_MoE_IR_S.')
     parser.add_argument('--epochs', type=int, default=120, help='Number of training epochs.')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size per GPU.')
     parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate.')
@@ -33,6 +33,7 @@ def base_parser():
     parser.add_argument('--loss_type', default="L1", help='Loss type.')
     parser.add_argument('--patch_size', type=int, default=128, help='Input patch size.')
     parser.add_argument('--balance_loss_weight', type=float, default=0.01, help='Balance loss weight.')
+    parser.add_argument('--msdr_attr_loss_weight', type=float, default=0.01, help='MSDR multi-label degradation attribute loss weight.')
     parser.add_argument('--fft_loss_weight', type=float, default=1.0, help='FFT loss weight.')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of data loading workers.')
     parser.add_argument('--accum_grad', type=int, default=1, help='Gradient accumulation steps.')
@@ -41,6 +42,7 @@ def base_parser():
     parser.add_argument('--checkpoint_id', type=str, help='checkpoint id')
     parser.add_argument('--benchmarks', nargs='+', help='which benchmarks to test on.')
     parser.add_argument('--save_results', action="store_true", help="Save restored outputs.")
+    parser.add_argument('--save_expert_stats', action="store_true", help="Save per-decoder expert activation statistics during testing.")
 
     # Paths
     parser.add_argument('--data_file_dir', type=str, default=os.path.join(pathlib.Path.home(), "datasets"), help='Path to datasets.')
@@ -86,9 +88,9 @@ def moce_ir(parser):
 def train_options():
     base_args = base_parser().parse_known_args()[0]
     
-    if base_args.model == "MoCE_IR_S":
+    if base_args.model in {"MoCE_IR_S", "MoE_IR_S", "MSDR_MoE_IR_S", "MSDR_Stage_MoE_IR_S"}:
         parser = moce_ir_s(base_parser())
-    elif base_args.model == "MoCE_IR":
+    elif base_args.model in {"MoCE_IR", "MoE_IR", "MSDR_MoE_IR", "MSDR_Stage_MoE_IR"}:
         parser = moce_ir(base_parser())
     else:
         raise NotImplementedError(f"Model '{base_args.model}' not found.")
